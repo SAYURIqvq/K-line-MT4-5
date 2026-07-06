@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>K-line MT4/5 Demo</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      background: #f5f7fa;
+      color: #172033;
+    }
+    header {
+      background: #111827;
+      color: #fff;
+      padding: 24px;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+    }
+    .meta {
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      padding: 18px;
+      margin: 18px 0;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    a.button {
+      display: inline-block;
+      padding: 10px 14px;
+      border-radius: 6px;
+      background: #111827;
+      color: #fff;
+      text-decoration: none;
+      font-weight: 700;
+    }
+    a.secondary {
+      background: #fff;
+      color: #111827;
+      border: 1px solid #cbd5e1;
+    }
+    code {
+      background: #eef2f7;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+    ul {
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>K-line MT4/5 Demo</h1>
+    <div class="meta">MT4/MT5 statement parser and interactive buy/sell point K-line chart demo.</div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>在线演示</h2>
+      <p>这个页面用于 GitHub Pages 静态演示。它展示已经生成好的测试 K 线图和相关输出文件。</p>
+      <div class="actions">
+        <a class="button" href="outputs/kline/206263_20240423_132557_20260608_145941_trade_kline.html">打开 K 线图</a>
+        <a class="button secondary" href="outputs/kline/206263_20240423_132557_20260608_145941_trades.csv">查看交易 CSV</a>
+        <a class="button secondary" href="outputs/kline/206263_20240423_132557_20260608_145941_mapping.json">查看映射 JSON</a>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>本地完整功能</h2>
+      <p>上传报表、连接 MT5 读取 M1 行情、重新生成图表等功能需要在 Windows 本地运行 Python 服务。</p>
+      <ul>
+        <li>账户台账：<code>http://127.0.0.1:8776</code></li>
+        <li>K 线生成：<code>http://127.0.0.1:8765</code></li>
+        <li>启动脚本：<code>scripts/start_all.ps1</code></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
