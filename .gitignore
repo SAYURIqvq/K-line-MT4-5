@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+pydeps/
+
+# Local runtime data and generated artifacts
+local_data/**
+!local_data/.gitkeep
+!local_data/problem_account_registry/
+!local_data/problem_account_registry/.gitkeep
+outputs/**
+!outputs/.gitkeep
+!outputs/kline/
+!outputs/kline/.gitkeep
+*.log
+*.err.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
