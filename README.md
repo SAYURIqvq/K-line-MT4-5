@@ -10,6 +10,22 @@ Default local services:
 - Account registry: `http://127.0.0.1:8776`
 - K-line generator: `http://127.0.0.1:8765`
 
+## Online Demo
+
+GitHub Pages demo:
+
+```text
+https://sayuriqvq.github.io/K-line-MT4-5/
+```
+
+Direct sample chart:
+
+```text
+https://sayuriqvq.github.io/K-line-MT4-5/outputs/kline/206263_20240423_132557_20260608_145941_trade_kline.html
+```
+
+The online demo is static and can show generated charts and sample output files. Uploading a new statement, reading MT5 M1 quotes, and regenerating charts require the local Windows service.
+
 ## Quick Start
 
 Double-click:
