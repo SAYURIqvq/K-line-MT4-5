@@ -214,6 +214,10 @@
           盈利前 N 名
           <input id="top" name="top" type="number" min="1" max="1000" value="20">
         </label>
+        <label>
+          交易日日期
+          <input id="date" name="date" type="date">
+        </label>
         <button id="submit" type="submit">筛选</button>
         <a id="download" class="button secondary" href="/api/ac-profit-rank.csv?days=1&top=20">下载 CSV</a>
       </form>
@@ -236,20 +240,21 @@
       "name",
       "group_name",
       "status",
-      "open_symb",
-      "volume_sum",
-      "close_symb",
+      "open_symbols",
+      "volume_sum_open",
+      "close_symbols",
       "volume_sum_close",
       "vol_diff",
       "profit_sum",
-      "floating_s",
-      "volume_fl",
+      "floating_symbols",
+      "volume_floating",
       "profit_floating",
     ];
-    const numeric = new Set(["balance", "volume_sum", "volume_sum_close", "vol_diff", "profit_sum", "volume_fl", "profit_floating"]);
+    const numeric = new Set(["balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"]);
     const form = document.getElementById("filterForm");
     const daysInput = document.getElementById("days");
     const topInput = document.getElementById("top");
+    const dateInput = document.getElementById("date");
     const status = document.getElementById("status");
     const notice = document.getElementById("notice");
     const head = document.getElementById("head");
@@ -288,6 +293,7 @@
       daysInput.value = days;
       topInput.value = top;
       const query = new URLSearchParams({ days, top });
+      if (dateInput.value) query.set("date", dateInput.value);
 
       download.href = `/api/ac-profit-rank.csv?${query.toString()}`;
       setError("");
@@ -298,7 +304,7 @@
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || "查询失败");
         render(payload.rows || []);
-        status.textContent = `起点 ${payload.start || "-"}，结果 ${payload.rows.length} 行`;
+        status.textContent = `区间 ${payload.start || "-"} 到 ${payload.end || "-"}，结果 ${payload.rows.length} 行`;
       } catch (error) {
         render([]);
         status.textContent = "查询失败";

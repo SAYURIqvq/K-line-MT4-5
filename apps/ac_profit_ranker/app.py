@@ -5,7 +5,7 @@ import html
 import io
 import json
 import os
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -29,14 +29,14 @@ FIELDS = [
     "name",
     "group_name",
     "status",
-    "open_symb",
-    "volume_sum",
-    "close_symb",
+    "open_symbols",
+    "volume_sum_open",
+    "close_symbols",
     "volume_sum_close",
     "vol_diff",
     "profit_sum",
-    "floating_s",
-    "volume_fl",
+    "floating_symbols",
+    "volume_floating",
     "profit_floating",
 ]
 
@@ -46,6 +46,16 @@ def trading_window_start(days: int, now: datetime | None = None) -> datetime:
     today_21 = datetime.combine(now.date(), time(21, 0, 0))
     current_session_start = today_21 if now >= today_21 else today_21 - timedelta(days=1)
     return current_session_start - timedelta(days=max(days, 1) - 1)
+
+
+def trading_window(days: int, trade_date: str | None = None) -> tuple[datetime, datetime]:
+    if trade_date:
+        target = date.fromisoformat(trade_date)
+        return (
+            datetime.combine(target - timedelta(days=max(days, 1)), time(21, 0, 0)),
+            datetime.combine(target, time(20, 59, 59)),
+        )
+    return trading_window_start(days), datetime.now()
 
 
 def parse_positive_int(value: str | None, default: int, max_value: int) -> int:
@@ -75,96 +85,238 @@ def db_conn():
 QUERY = """
 SELECT
   ranked.login,
-  ROUND(COALESCE(u.Balance, a.Balance, 0), 2) AS balance,
-  u.Registration AS REGDATE,
-  u.Name AS name,
-  u.`Group` AS group_name,
-  u.Status AS status,
-  COALESCE(o.open_symb, '') AS open_symb,
-  ROUND(COALESCE(o.volume_sum, 0), 2) AS volume_sum,
-  COALESCE(c.close_symb, '') AS close_symb,
-  ROUND(COALESCE(c.volume_sum_close, 0), 2) AS volume_sum_close,
-  ROUND(COALESCE(o.volume_sum, 0) - COALESCE(c.volume_sum_close, 0), 2) AS vol_diff,
-  ROUND(COALESCE(c.profit_sum, 0), 2) AS profit_sum,
-  COALESCE(f.floating_s, '') AS floating_s,
-  ROUND(COALESCE(f.volume_fl, 0), 2) AS volume_fl,
+  ROUND(COALESCE(u.balance, 0), 2) AS balance,
+  u.REGDATE,
+  u.name,
+  u.group_name,
+  u.status,
+  COALESCE(o.open_symbols, 'NULL') AS open_symbols,
+  ROUND(COALESCE(o.volume_sum_open, 0), 4) AS volume_sum_open,
+  COALESCE(c.close_symbols, 'NULL') AS close_symbols,
+  ROUND(COALESCE(c.volume_sum_close, 0), 4) AS volume_sum_close,
+  ROUND(COALESCE(c.volume_sum_close, 0) - COALESCE(o.volume_sum_open, 0), 4) AS vol_diff,
+  ROUND(COALESCE(c.profit_sum, 0), 4) AS profit_sum,
+  COALESCE(f.floating_symbols, 'NULL') AS floating_symbols,
+  ROUND(COALESCE(f.volume_floating, 0), 2) AS volume_floating,
   ROUND(COALESCE(f.profit_floating, 0), 2) AS profit_floating
 FROM (
-  SELECT Login AS login, SUM(Profit + Storage + Commission + Fee) AS profit_sum
-  FROM sass_crm_ac_mt5_live.mt5_deals
-  WHERE Time >= %s
-    AND Action IN (0, 1)
-    AND Entry IN (1, 3)
-  GROUP BY Login
+  SELECT login, SUM(profit_sum) AS profit_sum
+  FROM (
+    SELECT d.Login AS login,
+           SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_sum
+    FROM sass_crm_ac_mt5_live.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login
+    UNION ALL
+    SELECT d.Login AS login,
+           SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_sum
+    FROM int_sass_crm_ac_mt5_live_new.mt5_deals d
+    LEFT JOIN int_sass_crm_ac_mt5_live_new.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login
+    UNION ALL
+    SELECT t.LOGIN AS login, SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS profit_sum
+    FROM mt4_export_syc.mt4_trades t
+    LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+    WHERE t.CLOSE_TIME >= %s
+      AND t.CLOSE_TIME <= %s
+      AND t.CMD IN (0, 1)
+      AND u.`GROUP` LIKE 'PXM-%%'
+    GROUP BY t.LOGIN
+  ) close_union
+  GROUP BY login
   ORDER BY profit_sum DESC
   LIMIT %s
 ) ranked
-LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = ranked.login
-LEFT JOIN sass_crm_ac_mt5_live.mt5_accounts a ON a.Login = ranked.login
+LEFT JOIN (
+  SELECT Login AS login, Balance AS balance, Registration AS REGDATE, Name AS name, `Group` AS group_name, COALESCE(Status, '') AS status
+  FROM sass_crm_ac_mt5_live.mt5_users_view
+  UNION ALL
+  SELECT Login AS login, Balance AS balance, Registration AS REGDATE, Name AS name, `Group` AS group_name, COALESCE(Status, '') AS status
+  FROM int_sass_crm_ac_mt5_live_new.mt5_users_view
+  UNION ALL
+  SELECT LOGIN AS login, BALANCE AS balance, REGDATE AS REGDATE, NAME AS name, `GROUP` AS group_name, COALESCE(STATUS, '') AS status
+  FROM mt4_export_syc.mt4_users_view
+) u ON u.login = ranked.login
 LEFT JOIN (
   SELECT
-    Login,
-    GROUP_CONCAT(CONCAT(Symbol, ':', ROUND(lots, 2)) ORDER BY lots DESC SEPARATOR '; ') AS open_symb,
-    SUM(lots) AS volume_sum
+    login,
+    GROUP_CONCAT(Symbol ORDER BY Symbol ASC SEPARATOR ',') AS open_symbols,
+    SUM(lots) AS volume_sum_open
   FROM (
-    SELECT Login, Symbol, SUM(Volume) / 10000 AS lots
-    FROM sass_crm_ac_mt5_live.mt5_deals
-    WHERE Time >= %s
-      AND Action IN (0, 1)
-      AND Entry = 0
-    GROUP BY Login, Symbol
+    SELECT d.Login AS login, d.Symbol AS Symbol,
+           SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots
+    FROM sass_crm_ac_mt5_live.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry = 0
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT d.Login AS login, d.Symbol AS Symbol,
+           SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots
+    FROM int_sass_crm_ac_mt5_live_new.mt5_deals d
+    LEFT JOIN int_sass_crm_ac_mt5_live_new.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry = 0
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT t.LOGIN AS login, t.SYMBOL AS Symbol, SUM(t.VOLUME) / 100 AS lots
+    FROM mt4_export_syc.mt4_trades t
+    LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+    WHERE t.OPEN_TIME >= %s
+      AND t.OPEN_TIME <= %s
+      AND t.CMD IN (0, 1)
+      AND u.`GROUP` LIKE 'PXM-%%'
+    GROUP BY t.LOGIN, t.SYMBOL
   ) open_by_symbol
-  GROUP BY Login
-) o ON o.Login = ranked.login
+  GROUP BY login
+) o ON o.login = ranked.login
 LEFT JOIN (
   SELECT
-    Login,
-    GROUP_CONCAT(CONCAT(Symbol, ':', ROUND(lots, 2)) ORDER BY lots DESC SEPARATOR '; ') AS close_symb,
+    login,
+    GROUP_CONCAT(Symbol ORDER BY Symbol ASC SEPARATOR ',') AS close_symbols,
     SUM(lots) AS volume_sum_close,
     SUM(profit) AS profit_sum
   FROM (
     SELECT
-      Login,
-      Symbol,
-      SUM(Volume) / 10000 AS lots,
-      SUM(Profit + Storage + Commission + Fee) AS profit
-    FROM sass_crm_ac_mt5_live.mt5_deals
-    WHERE Time >= %s
-      AND Action IN (0, 1)
-      AND Entry IN (1, 3)
-    GROUP BY Login, Symbol
+      d.Login AS login,
+      d.Symbol AS Symbol,
+      SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit
+    FROM sass_crm_ac_mt5_live.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT
+      d.Login AS login,
+      d.Symbol AS Symbol,
+      SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit
+    FROM int_sass_crm_ac_mt5_live_new.mt5_deals d
+    LEFT JOIN int_sass_crm_ac_mt5_live_new.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT t.LOGIN AS login, t.SYMBOL AS Symbol,
+           SUM(t.VOLUME) / 100 AS lots,
+           SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS profit
+    FROM mt4_export_syc.mt4_trades t
+    LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+    WHERE t.CLOSE_TIME >= %s
+      AND t.CLOSE_TIME <= %s
+      AND t.CMD IN (0, 1)
+      AND u.`GROUP` LIKE 'PXM-%%'
+    GROUP BY t.LOGIN, t.SYMBOL
   ) close_by_symbol
-  GROUP BY Login
-) c ON c.Login = ranked.login
+  GROUP BY login
+) c ON c.login = ranked.login
 LEFT JOIN (
   SELECT
-    Login,
-    GROUP_CONCAT(CONCAT(Symbol, ':', ROUND(lots, 2)) ORDER BY lots DESC SEPARATOR '; ') AS floating_s,
-    SUM(lots) AS volume_fl,
+    login,
+    GROUP_CONCAT(Symbol ORDER BY Symbol ASC SEPARATOR ',') AS floating_symbols,
+    SUM(lots) AS volume_floating,
     SUM(profit_floating) AS profit_floating
   FROM (
     SELECT
-      Login,
-      Symbol,
-      SUM(Volume) / 10000 AS lots,
-      SUM(Profit + Storage) AS profit_floating
-    FROM sass_crm_ac_mt5_live.mt5_positions
-    GROUP BY Login, Symbol
+      p.Login AS login,
+      p.Symbol AS Symbol,
+      SUM(p.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((p.Profit + p.Storage) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_floating
+    FROM sass_crm_ac_mt5_live.mt5_positions p
+    LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = p.Login
+    WHERE u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY p.Login, p.Symbol
+    UNION ALL
+    SELECT
+      p.Login AS login,
+      p.Symbol AS Symbol,
+      SUM(p.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((p.Profit + p.Storage) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_floating
+    FROM int_sass_crm_ac_mt5_live_new.mt5_positions p
+    LEFT JOIN int_sass_crm_ac_mt5_live_new.mt5_users_view u ON u.Login = p.Login
+    WHERE u.`Group` NOT LIKE '%%Test%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY p.Login, p.Symbol
+    UNION ALL
+    SELECT t.LOGIN AS login, t.SYMBOL AS Symbol,
+           SUM(t.VOLUME) / 100 AS lots,
+           SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS profit_floating
+    FROM mt4_export_syc.mt4_trades t
+    LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+    WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
+      AND t.CMD IN (0, 1)
+      AND u.`GROUP` LIKE 'PXM-%%'
+    GROUP BY t.LOGIN, t.SYMBOL
   ) floating_by_symbol
-  GROUP BY Login
-) f ON f.Login = ranked.login
+  GROUP BY login
+) f ON f.login = ranked.login
 ORDER BY profit_sum DESC;
 """
 
 
-def run_query(days: int, top_n: int) -> tuple[datetime, list[dict]]:
-    start = trading_window_start(days)
+def run_query(days: int, top_n: int, trade_date: str | None = None) -> tuple[datetime, datetime, list[dict]]:
+    start, end = trading_window(days, trade_date)
     start_text = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(QUERY, (start_text, top_n, start_text, start_text))
+            cur.execute(
+                QUERY,
+                (
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    top_n,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                    start_text,
+                    end_text,
+                ),
+            )
             rows = cur.fetchall()
-    return start, rows
+    return start, end, rows
 
 
 def html_response(handler: BaseHTTPRequestHandler, body: str, status: int = 200) -> None:
@@ -193,9 +345,17 @@ def csv_response(handler: BaseHTTPRequestHandler, rows: list[dict], filename: st
     handler.wfile.write(data)
 
 
-def render_page(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "") -> str:
+def render_page(
+    days: int,
+    top_n: int,
+    start: datetime | None,
+    rows: list[dict] | None,
+    error: str = "",
+    end: datetime | None = None,
+    trade_date: str = "",
+) -> str:
     rows = rows or []
-    query = urlencode({"days": days, "top": top_n})
+    query = urlencode({"days": days, "top": top_n, "date": trade_date} if trade_date else {"days": days, "top": top_n})
     table_rows = []
     for row in rows:
         cells = []
@@ -203,12 +363,13 @@ def render_page(days: int, top_n: int, start: datetime | None, rows: list[dict] 
             value = row.get(field, "")
             if isinstance(value, datetime):
                 value = value.strftime("%Y-%m-%d %H:%M:%S")
-            cls = "num" if field in {"balance", "volume_sum", "volume_sum_close", "vol_diff", "profit_sum", "volume_fl", "profit_floating"} else ""
+            cls = "num" if field in {"balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"} else ""
             cells.append(f"<td class='{cls}'>{html.escape(str(value or ''))}</td>")
         table_rows.append("<tr>" + "".join(cells) + "</tr>")
     body_rows = "\n".join(table_rows) or f"<tr><td colspan='{len(FIELDS)}' class='empty'>暂无结果</td></tr>"
     headers = "".join(f"<th>{html.escape(field)}</th>" for field in FIELDS)
     start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
     rows_json = json.dumps(rows, ensure_ascii=False, default=str)
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -279,14 +440,15 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         days = parse_positive_int(params.get("days", ["7"])[0], 7, 365)
         top_n = parse_positive_int(params.get("top", ["50"])[0], 50, MAX_LIMIT)
+        trade_date = (params.get("date", [""])[0] or "").strip()
         try:
-            start, rows = run_query(days, top_n)
+            start, end, rows = run_query(days, top_n, trade_date or None)
             if parsed.path == "/download":
                 csv_response(self, rows, f"ac_profit_top_{top_n}_{days}d.csv")
                 return
-            html_response(self, render_page(days, top_n, start, rows))
+            html_response(self, render_page(days, top_n, start, rows, end=end, trade_date=trade_date))
         except Exception as exc:
-            html_response(self, render_page(days, top_n, None, [], str(exc)), 500)
+            html_response(self, render_page(days, top_n, None, [], str(exc), trade_date=trade_date), 500)
 
 
 def main() -> None:
