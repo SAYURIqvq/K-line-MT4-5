@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AC 盈利排名筛选</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --head: #eef3f8;
+      --action: #16324f;
+      --accent: #0f766e;
+      --danger: #b42318;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 22px;
+      background: #101828;
+      color: #fff;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .meta {
+      margin-top: 5px;
+      color: #cbd5e1;
+      font-size: 13px;
+    }
+
+    main {
+      padding: 18px 22px 28px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    form {
+      display: flex;
+      align-items: end;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    label {
+      display: grid;
+      gap: 5px;
+      color: #475467;
+      font-size: 13px;
+    }
+
+    input {
+      width: 132px;
+      border: 1px solid #b8c4d0;
+      border-radius: 6px;
+      padding: 8px 9px;
+      color: var(--ink);
+      font-size: 14px;
+      background: #fff;
+    }
+
+    button,
+    .button {
+      min-height: 36px;
+      border: 1px solid var(--action);
+      border-radius: 6px;
+      padding: 8px 13px;
+      background: var(--action);
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+      text-decoration: none;
+    }
+
+    .button.secondary {
+      border-color: #b8c4d0;
+      background: #fff;
+      color: var(--action);
+    }
+
+    .status {
+      min-width: 260px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: right;
+    }
+
+    .notice {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid #fecdca;
+      border-radius: 8px;
+      background: #fffbfa;
+      color: var(--danger);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .table-wrap {
+      height: calc(100vh - 160px);
+      min-height: 430px;
+      margin-top: 14px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    table {
+      width: max-content;
+      min-width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 12px;
+    }
+
+    th,
+    td {
+      max-width: 320px;
+      padding: 7px 8px;
+      border-right: 1px solid #e5e7eb;
+      border-bottom: 1px solid #e5e7eb;
+      white-space: nowrap;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--head);
+      color: #344054;
+      text-align: left;
+      font-weight: 700;
+    }
+
+    td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #fafafa;
+    }
+
+    .empty {
+      padding: 42px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    @media (max-width: 760px) {
+      header,
+      .toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .status {
+        min-width: 0;
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AC 盈利排名筛选</h1>
+      <div class="meta">交易日按 21:00 开始计算，支持滚动查看和 CSV 下载。</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="toolbar">
+      <form id="filterForm">
+        <label>
+          最近 N 个交易日
+          <input id="days" name="days" type="number" min="1" max="365" value="1">
+        </label>
+        <label>
+          盈利前 N 名
+          <input id="top" name="top" type="number" min="1" max="1000" value="20">
+        </label>
+        <button id="submit" type="submit">筛选</button>
+        <a id="download" class="button secondary" href="/api/ac-profit-rank.csv?days=1&top=20">下载 CSV</a>
+      </form>
+      <div id="status" class="status">准备查询</div>
+    </section>
+    <div id="notice" class="notice"></div>
+    <section class="table-wrap">
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="body"><tr><td class="empty">请输入条件后筛选</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const fields = [
+      "login",
+      "balance",
+      "REGDATE",
+      "name",
+      "group_name",
+      "status",
+      "open_symb",
+      "volume_sum",
+      "close_symb",
+      "volume_sum_close",
+      "vol_diff",
+      "profit_sum",
+      "floating_s",
+      "volume_fl",
+      "profit_floating",
+    ];
+    const numeric = new Set(["balance", "volume_sum", "volume_sum_close", "vol_diff", "profit_sum", "volume_fl", "profit_floating"]);
+    const form = document.getElementById("filterForm");
+    const daysInput = document.getElementById("days");
+    const topInput = document.getElementById("top");
+    const status = document.getElementById("status");
+    const notice = document.getElementById("notice");
+    const head = document.getElementById("head");
+    const body = document.getElementById("body");
+    const download = document.getElementById("download");
+
+    head.innerHTML = fields.map((field) => `<th>${field}</th>`).join("");
+
+    function text(value) {
+      return value === null || value === undefined ? "" : String(value);
+    }
+
+    function setError(message) {
+      notice.style.display = message ? "block" : "none";
+      notice.textContent = message || "";
+    }
+
+    function render(rows) {
+      if (!rows.length) {
+        body.innerHTML = `<tr><td class="empty" colspan="${fields.length}">暂无结果</td></tr>`;
+        return;
+      }
+
+      body.innerHTML = rows.map((row) => {
+        const cells = fields.map((field) => {
+          const cls = numeric.has(field) ? "num" : "";
+          return `<td class="${cls}">${text(row[field])}</td>`;
+        }).join("");
+        return `<tr>${cells}</tr>`;
+      }).join("");
+    }
+
+    async function load() {
+      const days = Math.max(1, Math.min(365, Number.parseInt(daysInput.value || "1", 10)));
+      const top = Math.max(1, Math.min(1000, Number.parseInt(topInput.value || "20", 10)));
+      daysInput.value = days;
+      topInput.value = top;
+      const query = new URLSearchParams({ days, top });
+
+      download.href = `/api/ac-profit-rank.csv?${query.toString()}`;
+      setError("");
+      status.textContent = "查询中...";
+
+      try {
+        const response = await fetch(`/api/ac-profit-rank?${query.toString()}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "查询失败");
+        render(payload.rows || []);
+        status.textContent = `起点 ${payload.start || "-"}，结果 ${payload.rows.length} 行`;
+      } catch (error) {
+        render([]);
+        status.textContent = "查询失败";
+        setError(error instanceof Error ? error.message : "查询失败");
+      }
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      load();
+    });
+
+    load();
+  </script>
+</body>
+</html>

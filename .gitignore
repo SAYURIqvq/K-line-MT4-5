@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 venv/
 pydeps/
+node_modules/
+.netlify/
 
 # Local runtime data and generated artifacts
 local_data/**

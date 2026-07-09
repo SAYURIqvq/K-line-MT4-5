@@ -1,0 +1,17 @@
+{
+  "name": "k-line-mt4-5",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "echo \"Static site ready\""
+  },
+  "dependencies": {
+    "@netlify/functions": "^4.2.5",
+    "mysql2": "^3.15.3"
+  },
+  "devDependencies": {
+    "netlify-cli": "^23.4.2",
+    "typescript": "^5.9.2"
+  }
+}
