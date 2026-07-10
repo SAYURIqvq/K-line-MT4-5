@@ -1376,6 +1376,8 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
           <div class="account-body">${renderMiniTable(account.trades || [])}</div>
         </details>`;
       batchResults.insertAdjacentHTML('beforeend', html);
+      const latest = batchResults.lastElementChild;
+      if (latest) latest.scrollIntoView({block: 'nearest'});
     }
     function setBatchButtons(done, hasNext) {
       batchBusy = false;
@@ -1446,7 +1448,7 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     </script>
     """ % json.dumps(TRADE_FIELDS, ensure_ascii=False)
     hint = "一键分析现在会流式输出：先取前100盈利账户排名，然后每个账号交易记录查完就立刻显示，不用等整批25个全部结束。"
-    return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
+    return render_shell("trades", "交易记录", controls, batch_html + single_table, len(rows), hint, error)
 
 
 MT5_SOURCES = [
