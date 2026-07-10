@@ -680,6 +680,127 @@ tr:nth-child(even) td{{background:#fafafa}}
 </html>"""
 
 
+BASE_STYLE = """
+body{margin:0;background:#f4f6f8;color:#172033;font-family:Arial,"Microsoft YaHei",sans-serif}
+header{background:#111827;color:#fff;padding:14px 22px 0}
+h1{font-size:20px;margin:0 0 12px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid #334155}
+.tab{display:inline-flex;align-items:center;min-height:40px;padding:0 16px;color:#cbd5e1;text-decoration:none;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;font-size:14px}
+.tab.active{background:#f4f6f8;color:#111827;border-color:#334155}
+main{padding:18px 22px 28px}
+.panel{background:white;border:1px solid #d9e2ec;border-radius:8px;padding:14px;margin-bottom:14px}
+.form-row{display:flex;gap:10px;align-items:end;flex-wrap:wrap}
+label{display:grid;gap:5px;font-size:13px;color:#475569}
+input{width:150px;border:1px solid #cbd5e1;border-radius:6px;padding:8px;font-size:14px;background:#fff}
+button,.btn{border:1px solid #111827;background:#111827;color:white;border-radius:6px;padding:9px 13px;cursor:pointer;text-decoration:none;font-size:14px}
+.btn.secondary{background:white;color:#111827;border-color:#cbd5e1}
+.hint{color:#64748b;font-size:13px;line-height:1.55;margin-top:10px}
+.error{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px;border-radius:6px;margin-top:10px}
+.table-wrap{height:calc(100vh - 250px);min-height:420px;overflow:auto;border:1px solid #d9e2ec;border-radius:8px;background:white}
+table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12px}
+th,td{border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:7px 8px;white-space:nowrap;vertical-align:top}
+th{position:sticky;top:0;background:#eef2f7;z-index:2;text-align:left}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr:nth-child(even) td{background:#fafafa}
+.empty{text-align:center;color:#64748b;padding:36px}
+@media (max-width:760px){header,main{padding-left:14px;padding-right:14px}.tabs{overflow:auto}.tab{white-space:nowrap}input{width:140px}}
+"""
+
+
+def render_table(fields: list[str], rows: list[dict], numeric_fields: set[str], empty_text: str) -> str:
+    headers = "".join(f"<th>{html.escape(field)}</th>" for field in fields)
+    table_rows = []
+    for row in rows:
+        cells = []
+        for field in fields:
+            value = row.get(field, "")
+            if isinstance(value, datetime):
+                value = value.strftime("%Y-%m-%d %H:%M:%S")
+            cls = "num" if field in numeric_fields else ""
+            cells.append(f"<td class='{cls}'>{html.escape(str(value or ''))}</td>")
+        table_rows.append("<tr>" + "".join(cells) + "</tr>")
+    body = "\n".join(table_rows) or f"<tr><td colspan='{len(fields)}' class='empty'>{html.escape(empty_text)}</td></tr>"
+    return f"<div class='table-wrap'><table><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table></div>"
+
+
+def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
+    rank_active = " active" if active == "rank" else ""
+    trades_active = " active" if active == "trades" else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>{BASE_STYLE}</style>
+</head>
+<body>
+<header>
+  <h1>AC 数据分析工具</h1>
+  <nav class="tabs">
+    <a class="tab{rank_active}" href="/">盈利排名</a>
+    <a class="tab{trades_active}" href="/trades">交易记录</a>
+  </nav>
+</header>
+<main>
+  <section class="panel">
+    {controls}
+    <div class="hint">{hint}</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{count} 行</div>
+    {table_html}
+  </section>
+</main>
+</body>
+</html>"""
+
+
+def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "", end: datetime | None = None, trade_date: str = "") -> str:
+    rows = rows or []
+    query = urlencode({"days": days, "top": top_n, "date": trade_date} if trade_date else {"days": days, "top": top_n})
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
+    controls = f"""
+    <form class="form-row" method="get" action="/">
+      <label>最近 N 个交易日<input name="days" type="number" min="1" max="365" value="{days}"></label>
+      <label>盈利前 N 名<input name="top" type="number" min="1" max="{MAX_LIMIT}" value="{top_n}"></label>
+      <label>交易日日期<input name="date" type="date" value="{html.escape(trade_date)}"></label>
+      <button type="submit">筛选</button>
+      <a class="btn secondary" href="/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        FIELDS,
+        rows,
+        {"balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"},
+        "暂无结果",
+    )
+    hint = f"查询区间：<b>{html.escape(start_text)}</b> 到 <b>{html.escape(end_text)}</b>。日期为空时按最近 N 个交易日；填 2026-07-09 表示 7.8 21:00 到 7.9 20:59:59。"
+    return render_shell("rank", "盈利排名", controls, table, len(rows), hint, error)
+
+
+def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    controls = f"""
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        TRADE_FIELDS,
+        rows,
+        {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"},
+        "请输入 login 查询",
+    )
+    hint = "自动查询 MT4、主 MT5、Int MT5、MT5 live3。按交易时间倒序显示，适合快速回看指定账号历史交易。"
+    return render_shell("trades", "交易记录", controls, table, len(rows), hint, error)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {self.address_string()} {fmt % args}")
@@ -699,9 +820,9 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == "/trades/download":
                     csv_response_for(self, rows, f"trades_{login}_{start_date}_{end_date}.csv", TRADE_FIELDS)
                     return
-                html_response(self, render_trade_page(login, start_date, end_date, limit, rows))
+                html_response(self, render_trade_page_ui(login, start_date, end_date, limit, rows))
             except Exception as exc:
-                html_response(self, render_trade_page(login, start_date, end_date, limit, [], str(exc)), 500)
+                html_response(self, render_trade_page_ui(login, start_date, end_date, limit, [], str(exc)), 500)
             return
 
         days = parse_positive_int(params.get("days", ["7"])[0], 7, 365)
@@ -712,9 +833,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/download":
                 csv_response(self, rows, f"ac_profit_top_{top_n}_{days}d.csv")
                 return
-            html_response(self, render_page(days, top_n, start, rows, end=end, trade_date=trade_date))
+            html_response(self, render_rank_page_ui(days, top_n, start, rows, end=end, trade_date=trade_date))
         except Exception as exc:
-            html_response(self, render_page(days, top_n, None, [], str(exc), trade_date=trade_date), 500)
+            html_response(self, render_rank_page_ui(days, top_n, None, [], str(exc), trade_date=trade_date), 500)
 
 
 def main() -> None:
