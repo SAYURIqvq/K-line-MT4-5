@@ -465,10 +465,10 @@ SELECT
   CASE d.Entry WHEN 0 THEN 'open' WHEN 1 THEN 'close' WHEN 2 THEN 'inout' WHEN 3 THEN 'out_by' ELSE CONCAT('entry_', d.Entry) END AS entry,
   d.Symbol AS symbol,
   ROUND(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS volume,
-  d.Time AS open_time,
-  d.Time AS close_time,
-  d.Price AS price_open,
-  d.Price AS price_close,
+  CASE WHEN d.Entry = 0 THEN d.Time ELSE o.Time END AS open_time,
+  CASE WHEN d.Entry IN (1, 3) THEN d.Time ELSE NULL END AS close_time,
+  CASE WHEN d.Entry = 0 THEN d.Price ELSE o.Price END AS price_open,
+  CASE WHEN d.Entry IN (1, 3) THEN d.Price ELSE NULL END AS price_close,
   ROUND((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS profit,
   ROUND(d.Storage / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS storage,
   ROUND(d.Commission / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS commission,
@@ -476,6 +476,11 @@ SELECT
   d.Comment AS comment
 FROM %s.mt5_deals d
 LEFT JOIN %s.mt5_users_view u ON u.Login = d.Login
+LEFT JOIN %s.mt5_deals o
+  ON o.Login = d.Login
+ AND o.PositionID = d.PositionID
+ AND o.Entry = 0
+ AND o.Action IN (0, 1)
 WHERE d.Login = %%s
   AND d.Time >= %%s
   AND d.Time <= %%s
@@ -532,7 +537,7 @@ def run_trade_query(login: str, start_date: str, end_date: str, limit: int) -> l
     with db_conn() as conn:
         with conn.cursor() as cur:
             for label, schema in mt5_sources:
-                cur.execute(MT5_TRADE_SELECT % ("%s", schema, schema), (label, login, start_text, end_text))
+                cur.execute(MT5_TRADE_SELECT % ("%s", schema, schema, schema), (label, login, start_text, end_text))
                 rows.extend(cur.fetchall())
             cur.execute(MT4_TRADE_SELECT, (login, start_text, end_text, start_text, end_text))
             rows.extend(cur.fetchall())
