@@ -1262,6 +1262,63 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
 
 
+def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
+    rank_active = " active" if active == "rank" else ""
+    trades_active = " active" if active == "trades" else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>{BASE_STYLE}</style>
+</head>
+<body>
+<header>
+  <h1>AC 数据分析工具</h1>
+  <nav class="tabs">
+    <a id="rankTabLink" class="tab{rank_active}" href="/">盈利排名</a>
+    <a class="tab{trades_active}" href="/trades">交易记录</a>
+  </nav>
+</header>
+<main>
+  <section class="panel">
+    {controls}
+    <div class="hint">{hint}</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{count} 行</div>
+    {table_html}
+  </section>
+</main>
+<div id="pageLoading" class="page-loading">查询中，请稍等...</div>
+<script>
+const rankTabLink = document.getElementById('rankTabLink');
+const currentUrl = new URL(window.location.href);
+if (currentUrl.pathname === '/' && currentUrl.search) {{
+  localStorage.setItem('acProfitRankLastUrl', currentUrl.pathname + currentUrl.search);
+}}
+if (rankTabLink) {{
+  const savedRankUrl = localStorage.getItem('acProfitRankLastUrl');
+  if (savedRankUrl) rankTabLink.href = savedRankUrl;
+}}
+document.addEventListener('submit', event => {{
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const loading = document.getElementById('pageLoading');
+  if (loading) loading.style.display = 'block';
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {{
+    button.disabled = true;
+    button.textContent = '查询中...';
+  }}
+}});
+</script>
+</body>
+</html>"""
+
+
 MT5_SOURCES = [
     ("mt5_live", "sass_crm_ac_mt5_live"),
     ("int_mt5_live_new", "int_sass_crm_ac_mt5_live_new"),
