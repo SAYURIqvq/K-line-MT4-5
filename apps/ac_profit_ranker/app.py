@@ -77,7 +77,7 @@ def db_conn():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=10,
-        read_timeout=90,
+        read_timeout=240,
         write_timeout=30,
     )
 
@@ -111,6 +111,7 @@ FROM (
       AND d.Action IN (0, 1)
       AND d.Entry IN (1, 3)
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login
     UNION ALL
@@ -123,6 +124,20 @@ FROM (
       AND d.Action IN (0, 1)
       AND d.Entry IN (1, 3)
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login
+    UNION ALL
+    SELECT d.Login AS login,
+           SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_sum
+    FROM sass_crm_ac_mt5_live3.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live3.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login
     UNION ALL
@@ -132,7 +147,7 @@ FROM (
     WHERE t.CLOSE_TIME >= %s
       AND t.CLOSE_TIME <= %s
       AND t.CMD IN (0, 1)
-      AND u.`GROUP` LIKE 'PXM-%%'
+      AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
     GROUP BY t.LOGIN
   ) close_union
   GROUP BY login
@@ -145,6 +160,9 @@ LEFT JOIN (
   UNION ALL
   SELECT Login AS login, Balance AS balance, Registration AS REGDATE, Name AS name, `Group` AS group_name, COALESCE(Status, '') AS status
   FROM int_sass_crm_ac_mt5_live_new.mt5_users_view
+  UNION ALL
+  SELECT Login AS login, Balance AS balance, Registration AS REGDATE, Name AS name, `Group` AS group_name, COALESCE(Status, '') AS status
+  FROM sass_crm_ac_mt5_live3.mt5_users_view
   UNION ALL
   SELECT LOGIN AS login, BALANCE AS balance, REGDATE AS REGDATE, NAME AS name, `GROUP` AS group_name, COALESCE(STATUS, '') AS status
   FROM mt4_export_syc.mt4_users_view
@@ -164,6 +182,7 @@ LEFT JOIN (
       AND d.Action IN (0, 1)
       AND d.Entry = 0
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login, d.Symbol
     UNION ALL
@@ -176,6 +195,20 @@ LEFT JOIN (
       AND d.Action IN (0, 1)
       AND d.Entry = 0
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT d.Login AS login, d.Symbol AS Symbol,
+           SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots
+    FROM sass_crm_ac_mt5_live3.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live3.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry = 0
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login, d.Symbol
     UNION ALL
@@ -185,7 +218,7 @@ LEFT JOIN (
     WHERE t.OPEN_TIME >= %s
       AND t.OPEN_TIME <= %s
       AND t.CMD IN (0, 1)
-      AND u.`GROUP` LIKE 'PXM-%%'
+      AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
     GROUP BY t.LOGIN, t.SYMBOL
   ) open_by_symbol
   GROUP BY login
@@ -209,6 +242,7 @@ LEFT JOIN (
       AND d.Action IN (0, 1)
       AND d.Entry IN (1, 3)
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login, d.Symbol
     UNION ALL
@@ -224,6 +258,23 @@ LEFT JOIN (
       AND d.Action IN (0, 1)
       AND d.Entry IN (1, 3)
       AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY d.Login, d.Symbol
+    UNION ALL
+    SELECT
+      d.Login AS login,
+      d.Symbol AS Symbol,
+      SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit
+    FROM sass_crm_ac_mt5_live3.mt5_deals d
+    LEFT JOIN sass_crm_ac_mt5_live3.mt5_users_view u ON u.Login = d.Login
+    WHERE d.Time >= %s
+      AND d.Time <= %s
+      AND d.Action IN (0, 1)
+      AND d.Entry IN (1, 3)
+      AND u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY d.Login, d.Symbol
     UNION ALL
@@ -235,7 +286,7 @@ LEFT JOIN (
     WHERE t.CLOSE_TIME >= %s
       AND t.CLOSE_TIME <= %s
       AND t.CMD IN (0, 1)
-      AND u.`GROUP` LIKE 'PXM-%%'
+      AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
     GROUP BY t.LOGIN, t.SYMBOL
   ) close_by_symbol
   GROUP BY login
@@ -255,6 +306,7 @@ LEFT JOIN (
     FROM sass_crm_ac_mt5_live.mt5_positions p
     LEFT JOIN sass_crm_ac_mt5_live.mt5_users_view u ON u.Login = p.Login
     WHERE u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY p.Login, p.Symbol
     UNION ALL
@@ -266,6 +318,19 @@ LEFT JOIN (
     FROM int_sass_crm_ac_mt5_live_new.mt5_positions p
     LEFT JOIN int_sass_crm_ac_mt5_live_new.mt5_users_view u ON u.Login = p.Login
     WHERE u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
+      AND COALESCE(u.Status, '') <> 'zzz'
+    GROUP BY p.Login, p.Symbol
+    UNION ALL
+    SELECT
+      p.Login AS login,
+      p.Symbol AS Symbol,
+      SUM(p.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+      SUM((p.Profit + p.Storage) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_floating
+    FROM sass_crm_ac_mt5_live3.mt5_positions p
+    LEFT JOIN sass_crm_ac_mt5_live3.mt5_users_view u ON u.Login = p.Login
+    WHERE u.`Group` NOT LIKE '%%Test%%'
+      AND u.`Group` NOT LIKE 'ACFIX%%'
       AND COALESCE(u.Status, '') <> 'zzz'
     GROUP BY p.Login, p.Symbol
     UNION ALL
@@ -276,7 +341,7 @@ LEFT JOIN (
     LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
     WHERE t.CLOSE_TIME = '1970-01-01 00:00:00'
       AND t.CMD IN (0, 1)
-      AND u.`GROUP` LIKE 'PXM-%%'
+      AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
     GROUP BY t.LOGIN, t.SYMBOL
   ) floating_by_symbol
   GROUP BY login
@@ -291,30 +356,13 @@ def run_query(days: int, top_n: int, trade_date: str | None = None) -> tuple[dat
     end_text = end.strftime("%Y-%m-%d %H:%M:%S")
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                QUERY,
-                (
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    top_n,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                    start_text,
-                    end_text,
-                ),
+            window = (start_text, end_text)
+            params = (
+                window + window + window + window + (top_n,) +
+                window + window + window + window +
+                window + window + window + window
             )
+            cur.execute(QUERY, params)
             rows = cur.fetchall()
     return start, end, rows
 
