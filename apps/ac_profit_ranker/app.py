@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import csv
+import calendar
 import html
 import io
 import json
 import os
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -744,6 +746,7 @@ def render_table(fields: list[str], rows: list[dict], numeric_fields: set[str], 
 
 def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "", end: datetime | None = None, trade_date: str = "") -> str:
     rows = rows or []
+    trade_date = trade_date or previous_trading_date()
     query = urlencode({"days": days, "top": top_n, "date": trade_date} if trade_date else {"days": days, "top": top_n})
     start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
     end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
@@ -838,6 +841,7 @@ def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: lis
 
 def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
     query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    default_rank_date = previous_trading_date()
     controls = f"""
     <form class="form-row" method="get" action="/trades">
       <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
@@ -948,7 +952,7 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     </form>
     <div class="split"></div>
     <div class="form-row">
-      <label>排名交易日<input id="batchDate" type="date"></label>
+      <label>排名交易日<input id="batchDate" type="date" value="{html.escape(default_rank_date)}"></label>
       <label>最近 N 个交易日<input id="batchDays" type="number" min="1" max="365" value="1"></label>
       <label>交易开始<input id="batchStart" type="date" value="{html.escape(start_date)}"></label>
       <label>交易结束<input id="batchEnd" type="date" value="{html.escape(end_date)}"></label>
@@ -1082,6 +1086,487 @@ document.addEventListener('submit', event => {{
 </script>
 </body>
 </html>"""
+
+
+def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
+    rank_active = " active" if active == "rank" else ""
+    trades_active = " active" if active == "trades" else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>{BASE_STYLE}</style>
+</head>
+<body>
+<header>
+  <h1>AC 数据分析工具</h1>
+  <nav class="tabs">
+    <a class="tab{rank_active}" href="/">盈利排名</a>
+    <a class="tab{trades_active}" href="/trades">交易记录</a>
+  </nav>
+</header>
+<main>
+  <section class="panel">
+    {controls}
+    <div class="hint">{hint}</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{count} 行</div>
+    {table_html}
+  </section>
+</main>
+<div id="pageLoading" class="page-loading">查询中，请稍等...</div>
+<script>
+document.addEventListener('submit', event => {{
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const loading = document.getElementById('pageLoading');
+  if (loading) loading.style.display = 'block';
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {{
+    button.disabled = true;
+    button.textContent = '查询中...';
+  }}
+}});
+</script>
+</body>
+</html>"""
+
+
+def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "", end: datetime | None = None, trade_date: str = "") -> str:
+    rows = rows or []
+    trade_date = trade_date or previous_trading_date()
+    query = urlencode({"days": days, "top": top_n, "date": trade_date})
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
+    controls = f"""
+    <form class="form-row" method="get" action="/">
+      <label>最近 N 个交易日<input name="days" type="number" min="1" max="365" value="{days}"></label>
+      <label>盈利前 N 名<input name="top" type="number" min="1" max="{MAX_LIMIT}" value="{top_n}"></label>
+      <label>交易日日期<input name="date" type="date" value="{html.escape(trade_date)}"></label>
+      <button type="submit">筛选</button>
+      <a class="btn secondary" href="/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        FIELDS,
+        rows,
+        {"balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"},
+        "点击筛选后显示结果",
+    )
+    hint = f"默认选择前一天、前100名。交易日按 21:00 开盘计算，例如 2026-07-09 表示 7.8 21:00 到 7.9 收盘。当前查询区间：<b>{html.escape(start_text)}</b> 到 <b>{html.escape(end_text)}</b>。"
+    return render_shell("rank", "盈利排名", controls, table, len(rows), hint, error)
+
+
+def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    default_rank_date = previous_trading_date()
+    controls = f"""
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询单账号</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+    </form>
+    <div class="split"></div>
+    <div class="form-row">
+      <label>排名交易日<input id="batchDate" type="date" value="{html.escape(default_rank_date)}"></label>
+      <label>最近 N 个交易日<input id="batchDays" type="number" min="1" max="365" value="1"></label>
+      <label>交易开始<input id="batchStart" type="date" value="{html.escape(start_date)}"></label>
+      <label>交易结束<input id="batchEnd" type="date" value="{html.escape(end_date)}"></label>
+      <label>每账号最多交易<input id="batchLimit" type="number" min="1" max="1000" value="100"></label>
+    </div>
+    <div class="batch-actions">
+      <button id="batchStartBtn" type="button">一键分析前100盈利账户</button>
+      <button id="batchNextBtn" type="button" class="btn secondary" disabled>下一批 25 个</button>
+      <span id="batchStatus" class="loading"></span>
+    </div>"""
+    single_table = render_table(
+        TRADE_FIELDS,
+        rows,
+        {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"},
+        "请输入 login 查询，或使用上方一键分析批量查看。",
+    )
+    batch_html = """
+    <div id="batchResults"></div>
+    <script>
+    const tradeFields = %s;
+    let batchOffset = 0;
+    let batchBusy = false;
+    const batchStartBtn = document.getElementById('batchStartBtn');
+    const batchNextBtn = document.getElementById('batchNextBtn');
+    const batchStatus = document.getElementById('batchStatus');
+    const batchResults = document.getElementById('batchResults');
+    function htmlEscape(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function renderMiniTable(rows) {
+      if (!rows.length) return '<div class="empty">这个账号在所选日期内暂无交易</div>';
+      const head = tradeFields.map(field => `<th>${htmlEscape(field)}</th>`).join('');
+      const body = rows.map(row => `<tr>${tradeFields.map(field => `<td>${htmlEscape(row[field])}</td>`).join('')}</tr>`).join('');
+      return `<div class="mini-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+    function appendAccounts(accounts) {
+      const html = accounts.map(account => `
+        <details class="account-card">
+          <summary>序号 ${account.seq} - login ${htmlEscape(account.login)} - ${htmlEscape(account.name)} - 盈利 ${htmlEscape(account.profit_sum)} - 交易 ${account.trade_count} 条</summary>
+          <div class="account-body">${renderMiniTable(account.trades || [])}</div>
+        </details>
+      `).join('');
+      batchResults.insertAdjacentHTML('beforeend', html);
+    }
+    async function loadBatch(reset) {
+      if (batchBusy) return;
+      batchBusy = true;
+      if (reset) {
+        batchOffset = 0;
+        batchResults.innerHTML = '';
+      }
+      batchStartBtn.disabled = true;
+      batchNextBtn.disabled = true;
+      batchStatus.textContent = `加载中：第 ${batchOffset + 1} 到 ${batchOffset + 25} 个账号...`;
+      const query = new URLSearchParams({
+        offset: String(batchOffset),
+        batch: '25',
+        top: '100',
+        days: document.getElementById('batchDays').value || '1',
+        date: document.getElementById('batchDate').value || '',
+        start: document.getElementById('batchStart').value,
+        end: document.getElementById('batchEnd').value,
+        limit: document.getElementById('batchLimit').value || '100'
+      });
+      try {
+        const response = await fetch(`/api/analyze-batch?${query.toString()}`, {cache: 'no-store'});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || '批量分析失败');
+        appendAccounts(payload.accounts || []);
+        batchOffset = payload.next_offset || batchOffset + 25;
+        batchNextBtn.disabled = !payload.has_next;
+        batchStatus.textContent = payload.has_next ? `已加载到第 ${batchOffset} 个，可继续下一批。` : '前100账号已加载完。';
+      } catch (error) {
+        batchStatus.textContent = error instanceof Error ? error.message : '批量分析失败';
+      } finally {
+        batchBusy = false;
+        batchStartBtn.disabled = false;
+      }
+    }
+    batchStartBtn.addEventListener('click', () => loadBatch(true));
+    batchNextBtn.addEventListener('click', () => loadBatch(false));
+    </script>
+    """ % json.dumps(TRADE_FIELDS, ensure_ascii=False)
+    hint = "切换 tab 不会查数据库。单账号查询只查输入的 login；一键分析会自动按前一天前100盈利账户顺序，每25个账号一批加载，并且每个账号都可以折叠查看。"
+    return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
+
+
+MT5_SOURCES = [
+    ("mt5_live", "sass_crm_ac_mt5_live"),
+    ("int_mt5_live_new", "int_sass_crm_ac_mt5_live_new"),
+    ("mt5_live3", "sass_crm_ac_mt5_live3"),
+]
+
+
+def previous_trading_date() -> str:
+    return (date.today() - timedelta(days=1)).isoformat()
+
+
+def as_decimal(value) -> Decimal:
+    return Decimal("0") if value is None else Decimal(str(value))
+
+
+def placeholders(values: list[str]) -> str:
+    return ",".join(["%s"] * len(values))
+
+
+def daily_cutoff_epoch(date_text: str) -> int:
+    cutoff = datetime.strptime(f"{date_text} 20:59:59", "%Y-%m-%d %H:%M:%S")
+    return calendar.timegm(cutoff.timetuple())
+
+
+def optimized_rank_rows_from_deals(cur, start_text: str, end_text: str, top_n: int) -> list[tuple[str, Decimal]]:
+    profits: dict[str, Decimal] = {}
+    for _label, schema in MT5_SOURCES:
+        cur.execute(
+            f"""
+            SELECT d.Login AS login,
+                   SUM((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_sum
+            FROM {schema}.mt5_deals d
+            LEFT JOIN {schema}.mt5_users_view u ON u.Login = d.Login
+            WHERE d.Time >= %s AND d.Time <= %s
+              AND d.Action IN (0, 1)
+              AND d.Entry IN (1, 3)
+              AND u.`Group` NOT LIKE '%%Test%%'
+              AND u.`Group` NOT LIKE 'ACFIX%%'
+              AND COALESCE(u.Status, '') <> 'zzz'
+            GROUP BY d.Login
+            """,
+            (start_text, end_text),
+        )
+        for row in cur.fetchall():
+            login = str(row["login"])
+            profits[login] = profits.get(login, Decimal("0")) + as_decimal(row["profit_sum"])
+
+    cur.execute(
+        """
+        SELECT t.LOGIN AS login, SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS profit_sum
+        FROM mt4_export_syc.mt4_trades t
+        LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+        WHERE t.CLOSE_TIME >= %s AND t.CLOSE_TIME <= %s
+          AND t.CMD IN (0, 1)
+          AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
+        GROUP BY t.LOGIN
+        """,
+        (start_text, end_text),
+    )
+    for row in cur.fetchall():
+        login = str(row["login"])
+        profits[login] = profits.get(login, Decimal("0")) + as_decimal(row["profit_sum"])
+    return sorted(profits.items(), key=lambda item: item[1], reverse=True)[:top_n]
+
+
+def optimized_rank_rows(cur, start_text: str, end_text: str, top_n: int) -> list[tuple[str, Decimal]]:
+    first_daily_date = (datetime.strptime(start_text[:10], "%Y-%m-%d").date() + timedelta(days=1))
+    last_daily_date = datetime.strptime(end_text[:10], "%Y-%m-%d").date()
+    daily_dates = []
+    current_daily_date = first_daily_date
+    while current_daily_date <= last_daily_date:
+        daily_dates.append(current_daily_date.isoformat())
+        current_daily_date += timedelta(days=1)
+    if not daily_dates:
+        return optimized_rank_rows_from_deals(cur, start_text, end_text, top_n)
+    daily_epochs = [daily_cutoff_epoch(day) for day in daily_dates]
+    epoch_ph = placeholders([str(epoch) for epoch in daily_epochs])
+    time_ph = placeholders(daily_dates)
+    daily_times = [f"{day} 20:59:59" for day in daily_dates]
+    profits: dict[str, Decimal] = {}
+
+    for _label, schema in MT5_SOURCES:
+        cur.execute(
+            f"""
+            SELECT Login AS login,
+                   SUM((DailyProfit + DailyStorage) / CASE WHEN `Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit_sum
+            FROM {schema}.mt5_daily_view
+            WHERE Datetime IN ({epoch_ph})
+              AND `Group` NOT LIKE '%%Test%%'
+              AND `Group` NOT LIKE 'ACFIX%%'
+              AND `Group` NOT LIKE '%%GIVEUP%%'
+            GROUP BY Login
+            """,
+            tuple(daily_epochs),
+        )
+        for row in cur.fetchall():
+            login = str(row["login"])
+            profits[login] = profits.get(login, Decimal("0")) + as_decimal(row["profit_sum"])
+
+    cur.execute(
+        """
+        SELECT LOGIN AS login, SUM(PROFIT_CLOSED) AS profit_sum
+        FROM mt4_export_syc.mt4_daily
+        WHERE TIME IN ({time_ph})
+          AND (`GROUP` LIKE 'PXM-%%' OR `GROUP` LIKE 'TO-%%')
+          AND `GROUP` NOT LIKE '%%GIVEUP%%'
+        GROUP BY LOGIN
+        """.format(time_ph=time_ph),
+        tuple(daily_times),
+    )
+    for row in cur.fetchall():
+        login = str(row["login"])
+        profits[login] = profits.get(login, Decimal("0")) + as_decimal(row["profit_sum"])
+
+    ranked = sorted(profits.items(), key=lambda item: item[1], reverse=True)[:top_n]
+    if ranked:
+        return ranked
+    return optimized_rank_rows_from_deals(cur, start_text, end_text, top_n)
+
+
+def new_account_bucket(login: str, profit: Decimal) -> dict:
+    return {
+        "login": login,
+        "balance": Decimal("0"),
+        "REGDATE": "",
+        "name": "",
+        "group_name": "",
+        "status": "",
+        "open_symbols": set(),
+        "volume_sum_open": Decimal("0"),
+        "close_symbols": set(),
+        "volume_sum_close": Decimal("0"),
+        "profit_sum": profit,
+        "floating_symbols": set(),
+        "volume_floating": Decimal("0"),
+        "profit_floating": Decimal("0"),
+    }
+
+
+def add_symbol(bucket: dict, key: str, symbol) -> None:
+    symbol = str(symbol or "").strip()
+    if symbol:
+        bucket[key].add(symbol)
+
+
+def apply_user_info(cur, accounts: dict[str, dict], logins: list[str]) -> None:
+    if not logins:
+        return
+    ph = placeholders(logins)
+    for _label, schema in MT5_SOURCES:
+        cur.execute(
+            f"SELECT Login AS login, Balance AS balance, Registration AS REGDATE, Name AS name, `Group` AS group_name, COALESCE(Status, '') AS status FROM {schema}.mt5_users_view WHERE Login IN ({ph})",
+            tuple(logins),
+        )
+        for row in cur.fetchall():
+            bucket = accounts.get(str(row["login"]))
+            if bucket and not bucket["group_name"]:
+                bucket.update(row)
+    cur.execute(
+        f"SELECT LOGIN AS login, BALANCE AS balance, REGDATE AS REGDATE, NAME AS name, `GROUP` AS group_name, COALESCE(STATUS, '') AS status FROM mt4_export_syc.mt4_users_view WHERE LOGIN IN ({ph})",
+        tuple(logins),
+    )
+    for row in cur.fetchall():
+        bucket = accounts.get(str(row["login"]))
+        if bucket and not bucket["group_name"]:
+            bucket.update(row)
+
+
+def apply_deal_symbol_aggregates(cur, accounts: dict[str, dict], logins: list[str], start_text: str, end_text: str, entry_mode: str) -> None:
+    if not logins:
+        return
+    ph = placeholders(logins)
+    if entry_mode == "open":
+        mt5_entry = "d.Entry = 0"
+        mt4_time = "t.OPEN_TIME"
+        symbol_key = "open_symbols"
+        volume_key = "volume_sum_open"
+    else:
+        mt5_entry = "d.Entry IN (1, 3)"
+        mt4_time = "t.CLOSE_TIME"
+        symbol_key = "close_symbols"
+        volume_key = "volume_sum_close"
+
+    for _label, schema in MT5_SOURCES:
+        cur.execute(
+            f"""
+            SELECT d.Login AS login, d.Symbol AS symbol,
+                   SUM(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots
+            FROM {schema}.mt5_deals d
+            LEFT JOIN {schema}.mt5_users_view u ON u.Login = d.Login
+            WHERE d.Login IN ({ph})
+              AND d.Time >= %s AND d.Time <= %s
+              AND d.Action IN (0, 1)
+              AND {mt5_entry}
+              AND u.`Group` NOT LIKE '%%Test%%'
+              AND u.`Group` NOT LIKE 'ACFIX%%'
+              AND COALESCE(u.Status, '') <> 'zzz'
+            GROUP BY d.Login, d.Symbol
+            """,
+            tuple(logins) + (start_text, end_text),
+        )
+        for row in cur.fetchall():
+            bucket = accounts[str(row["login"])]
+            add_symbol(bucket, symbol_key, row["symbol"])
+            bucket[volume_key] += as_decimal(row["lots"])
+
+    cur.execute(
+        f"""
+        SELECT t.LOGIN AS login, t.SYMBOL AS symbol, SUM(t.VOLUME) / 100 AS lots
+        FROM mt4_export_syc.mt4_trades t
+        LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+        WHERE t.LOGIN IN ({ph})
+          AND {mt4_time} >= %s AND {mt4_time} <= %s
+          AND t.CMD IN (0, 1)
+          AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
+        GROUP BY t.LOGIN, t.SYMBOL
+        """,
+        tuple(logins) + (start_text, end_text),
+    )
+    for row in cur.fetchall():
+        bucket = accounts[str(row["login"])]
+        add_symbol(bucket, symbol_key, row["symbol"])
+        bucket[volume_key] += as_decimal(row["lots"])
+
+
+def apply_floating_fast(cur, accounts: dict[str, dict], logins: list[str]) -> None:
+    if not logins:
+        return
+    ph = placeholders(logins)
+    for _label, schema in MT5_SOURCES:
+        cur.execute(
+            f"""
+            SELECT p.Login AS login, p.Symbol AS symbol,
+                   SUM(p.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS lots,
+                   SUM((p.Profit + p.Storage) / CASE WHEN u.`Group` LIKE '%%Cent%%' THEN 100 ELSE 1 END) AS profit
+            FROM {schema}.mt5_positions p
+            LEFT JOIN {schema}.mt5_users_view u ON u.Login = p.Login
+            WHERE p.Login IN ({ph})
+              AND u.`Group` NOT LIKE '%%Test%%'
+              AND u.`Group` NOT LIKE 'ACFIX%%'
+              AND COALESCE(u.Status, '') <> 'zzz'
+            GROUP BY p.Login, p.Symbol
+            """,
+            tuple(logins),
+        )
+        for row in cur.fetchall():
+            bucket = accounts[str(row["login"])]
+            add_symbol(bucket, "floating_symbols", row["symbol"])
+            bucket["volume_floating"] += as_decimal(row["lots"])
+            bucket["profit_floating"] += as_decimal(row["profit"])
+    cur.execute(
+        f"""
+        SELECT t.LOGIN AS login, t.SYMBOL AS symbol, SUM(t.VOLUME) / 100 AS lots,
+               SUM(t.PROFIT + t.SWAPS + t.COMMISSION) AS profit
+        FROM mt4_export_syc.mt4_trades t
+        LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+        WHERE t.LOGIN IN ({ph})
+          AND t.CLOSE_TIME = '1970-01-01 00:00:00'
+          AND t.CMD IN (0, 1)
+          AND (u.`GROUP` LIKE 'PXM-%%' OR u.`GROUP` LIKE 'TO-%%')
+        GROUP BY t.LOGIN, t.SYMBOL
+        """,
+        tuple(logins),
+    )
+    for row in cur.fetchall():
+        bucket = accounts[str(row["login"])]
+        add_symbol(bucket, "floating_symbols", row["symbol"])
+        bucket["volume_floating"] += as_decimal(row["lots"])
+        bucket["profit_floating"] += as_decimal(row["profit"])
+
+
+def run_query(days: int, top_n: int, trade_date: str | None = None) -> tuple[datetime, datetime, list[dict]]:
+    start, end = trading_window(days, trade_date)
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            ranked = optimized_rank_rows(cur, start_text, end_text, top_n)
+            logins = [login for login, _profit in ranked]
+            accounts = {login: new_account_bucket(login, profit) for login, profit in ranked}
+            apply_user_info(cur, accounts, logins)
+            apply_deal_symbol_aggregates(cur, accounts, logins, start_text, end_text, "open")
+            apply_deal_symbol_aggregates(cur, accounts, logins, start_text, end_text, "close")
+            apply_floating_fast(cur, accounts, logins)
+    rows = []
+    for login in logins:
+        b = accounts[login]
+        rows.append({
+            "login": login,
+            "balance": round(as_decimal(b.get("balance")), 2),
+            "REGDATE": b.get("REGDATE") or "",
+            "name": b.get("name") or "",
+            "group_name": b.get("group_name") or "",
+            "status": b.get("status") or "",
+            "open_symbols": ",".join(sorted(b["open_symbols"])) or "NULL",
+            "volume_sum_open": f"{b['volume_sum_open']:.4f}",
+            "close_symbols": ",".join(sorted(b["close_symbols"])) or "NULL",
+            "volume_sum_close": f"{b['volume_sum_close']:.4f}",
+            "vol_diff": f"{(b['volume_sum_close'] - b['volume_sum_open']):.4f}",
+            "profit_sum": f"{b['profit_sum']:.4f}",
+            "floating_symbols": ",".join(sorted(b["floating_symbols"])) or "NULL",
+            "volume_floating": f"{b['volume_floating']:.2f}",
+            "profit_floating": f"{b['profit_floating']:.2f}",
+        })
+    return start, end, rows
 
 
 class Handler(BaseHTTPRequestHandler):
