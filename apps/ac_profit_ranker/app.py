@@ -40,6 +40,29 @@ FIELDS = [
     "profit_floating",
 ]
 
+TRADE_FIELDS = [
+    "source",
+    "login",
+    "name",
+    "group_name",
+    "ticket",
+    "order_id",
+    "position_id",
+    "side",
+    "entry",
+    "symbol",
+    "volume",
+    "open_time",
+    "close_time",
+    "price_open",
+    "price_close",
+    "profit",
+    "storage",
+    "commission",
+    "fee",
+    "comment",
+]
+
 
 def trading_window_start(days: int, now: datetime | None = None) -> datetime:
     now = now or datetime.now()
@@ -64,6 +87,14 @@ def parse_positive_int(value: str | None, default: int, max_value: int) -> int:
     except ValueError:
         return default
     return min(max(parsed, 1), max_value)
+
+
+def parse_date_text(value: str | None) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    date.fromisoformat(value)
+    return value
 
 
 def db_conn():
@@ -393,6 +424,176 @@ def csv_response(handler: BaseHTTPRequestHandler, rows: list[dict], filename: st
     handler.wfile.write(data)
 
 
+def csv_response_for(handler: BaseHTTPRequestHandler, rows: list[dict], filename: str, fields: list[str]) -> None:
+    buf = io.StringIO(newline="")
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: row.get(key, "") for key in fields})
+    data = ("\ufeff" + buf.getvalue()).encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/csv; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+MT5_TRADE_SELECT = """
+SELECT
+  %s AS source,
+  d.Login AS login,
+  u.Name AS name,
+  u.`Group` AS group_name,
+  d.Deal AS ticket,
+  d.`Order` AS order_id,
+  d.PositionID AS position_id,
+  CASE d.Action WHEN 0 THEN 'buy' WHEN 1 THEN 'sell' ELSE CONCAT('action_', d.Action) END AS side,
+  CASE d.Entry WHEN 0 THEN 'open' WHEN 1 THEN 'close' WHEN 2 THEN 'inout' WHEN 3 THEN 'out_by' ELSE CONCAT('entry_', d.Entry) END AS entry,
+  d.Symbol AS symbol,
+  ROUND(d.Volume / 10000 / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS volume,
+  d.Time AS open_time,
+  d.Time AS close_time,
+  d.Price AS price_open,
+  d.Price AS price_close,
+  ROUND((d.Profit + d.Storage + d.Commission + d.Fee) / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS profit,
+  ROUND(d.Storage / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS storage,
+  ROUND(d.Commission / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS commission,
+  ROUND(d.Fee / CASE WHEN u.`Group` LIKE '%%%%Cent%%%%' THEN 100 ELSE 1 END, 4) AS fee,
+  d.Comment AS comment
+FROM %s.mt5_deals d
+LEFT JOIN %s.mt5_users_view u ON u.Login = d.Login
+WHERE d.Login = %%s
+  AND d.Time >= %%s
+  AND d.Time <= %%s
+  AND d.Action IN (0, 1)
+"""
+
+
+MT4_TRADE_SELECT = """
+SELECT
+  'mt4_export_syc' AS source,
+  t.LOGIN AS login,
+  u.NAME AS name,
+  u.`GROUP` AS group_name,
+  t.TICKET AS ticket,
+  '' AS order_id,
+  '' AS position_id,
+  CASE t.CMD WHEN 0 THEN 'buy' WHEN 1 THEN 'sell' ELSE CONCAT('cmd_', t.CMD) END AS side,
+  CASE WHEN t.CLOSE_TIME = '1970-01-01 00:00:00' THEN 'open' ELSE 'close' END AS entry,
+  t.SYMBOL AS symbol,
+  ROUND(t.VOLUME / 100, 4) AS volume,
+  t.OPEN_TIME AS open_time,
+  CASE WHEN t.CLOSE_TIME = '1970-01-01 00:00:00' THEN NULL ELSE t.CLOSE_TIME END AS close_time,
+  t.OPEN_PRICE AS price_open,
+  t.CLOSE_PRICE AS price_close,
+  ROUND(t.PROFIT + t.SWAPS + t.COMMISSION, 4) AS profit,
+  ROUND(t.SWAPS, 4) AS storage,
+  ROUND(t.COMMISSION, 4) AS commission,
+  0 AS fee,
+  t.COMMENT AS comment
+FROM mt4_export_syc.mt4_trades t
+LEFT JOIN mt4_export_syc.mt4_users_view u ON u.LOGIN = t.LOGIN
+WHERE t.LOGIN = %s
+  AND t.CMD IN (0, 1)
+  AND (
+    (t.OPEN_TIME >= %s AND t.OPEN_TIME <= %s)
+    OR (t.CLOSE_TIME >= %s AND t.CLOSE_TIME <= %s)
+    OR t.CLOSE_TIME = '1970-01-01 00:00:00'
+  )
+"""
+
+
+def run_trade_query(login: str, start_date: str, end_date: str, limit: int) -> list[dict]:
+    login = login.strip()
+    if not login.isdigit():
+        raise ValueError("login must be numeric.")
+    start_text = f"{start_date} 00:00:00"
+    end_text = f"{end_date} 23:59:59"
+    mt5_sources = [
+        ("mt5_live", "sass_crm_ac_mt5_live"),
+        ("int_mt5_live_new", "int_sass_crm_ac_mt5_live_new"),
+        ("mt5_live3", "sass_crm_ac_mt5_live3"),
+    ]
+    rows: list[dict] = []
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            for label, schema in mt5_sources:
+                cur.execute(MT5_TRADE_SELECT % ("%s", schema, schema), (label, login, start_text, end_text))
+                rows.extend(cur.fetchall())
+            cur.execute(MT4_TRADE_SELECT, (login, start_text, end_text, start_text, end_text))
+            rows.extend(cur.fetchall())
+    rows.sort(key=lambda row: str(row.get("close_time") or row.get("open_time") or ""), reverse=True)
+    return rows[:limit]
+
+
+def render_trade_page(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    headers = "".join(f"<th>{html.escape(field)}</th>" for field in TRADE_FIELDS)
+    table_rows = []
+    for row in rows:
+        cells = []
+        for field in TRADE_FIELDS:
+            value = row.get(field, "")
+            if isinstance(value, datetime):
+                value = value.strftime("%Y-%m-%d %H:%M:%S")
+            cls = "num" if field in {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"} else ""
+            cells.append(f"<td class='{cls}'>{html.escape(str(value or ''))}</td>")
+        table_rows.append("<tr>" + "".join(cells) + "</tr>")
+    body_rows = "\n".join(table_rows) or f"<tr><td colspan='{len(TRADE_FIELDS)}' class='empty'>请输入 login 查询</td></tr>"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login 交易记录查询</title>
+<style>
+body{{margin:0;background:#f4f6f8;color:#172033;font-family:Arial,"Microsoft YaHei",sans-serif}}
+header{{background:#111827;color:white;padding:16px 22px}}
+h1{{font-size:20px;margin:0}}
+main{{padding:18px 22px 28px}}
+.panel{{background:white;border:1px solid #d9e2ec;border-radius:8px;padding:14px;margin-bottom:14px}}
+.form-row{{display:flex;gap:10px;align-items:end;flex-wrap:wrap}}
+label{{display:grid;gap:5px;font-size:13px;color:#475569}}
+input{{width:150px;border:1px solid #cbd5e1;border-radius:6px;padding:8px;font-size:14px}}
+button,.btn{{border:1px solid #111827;background:#111827;color:white;border-radius:6px;padding:9px 13px;cursor:pointer;text-decoration:none;font-size:14px}}
+.btn.secondary{{background:white;color:#111827;border-color:#cbd5e1}}
+.hint{{color:#64748b;font-size:13px;line-height:1.55;margin-top:10px}}
+.error{{color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:10px;border-radius:6px;margin-top:10px}}
+.table-wrap{{height:calc(100vh - 250px);min-height:420px;overflow:auto;border:1px solid #d9e2ec;border-radius:8px;background:white}}
+table{{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12px}}
+th,td{{border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:7px 8px;white-space:nowrap;vertical-align:top}}
+th{{position:sticky;top:0;background:#eef2f7;z-index:2;text-align:left}}
+td.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.empty{{text-align:center;color:#64748b;padding:36px}}
+</style>
+</head>
+<body>
+<header><h1>Login 交易记录查询</h1></header>
+<main>
+  <section class="panel">
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+      <a class="btn secondary" href="/">返回排名</a>
+    </form>
+    <div class="hint">自动查询 MT4、主 MT5、Int MT5、MT5 live3。默认按交易时间倒序显示。</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{len(rows)} 行</div>
+    <div class="table-wrap"><table><thead><tr>{headers}</tr></thead><tbody>{body_rows}</tbody></table></div>
+  </section>
+</main>
+</body>
+</html>"""
+
+
 def render_page(
     days: int,
     top_n: int,
@@ -486,6 +687,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        if parsed.path in {"/trades", "/trades/download"}:
+            login = (params.get("login", [""])[0] or "").strip()
+            today = date.today()
+            default_start = (today - timedelta(days=30)).isoformat()
+            start_date = parse_date_text(params.get("start", [default_start])[0] or default_start)
+            end_date = parse_date_text(params.get("end", [today.isoformat()])[0] or today.isoformat())
+            limit = parse_positive_int(params.get("limit", ["500"])[0], 500, 5000)
+            try:
+                rows = run_trade_query(login, start_date, end_date, limit) if login else []
+                if parsed.path == "/trades/download":
+                    csv_response_for(self, rows, f"trades_{login}_{start_date}_{end_date}.csv", TRADE_FIELDS)
+                    return
+                html_response(self, render_trade_page(login, start_date, end_date, limit, rows))
+            except Exception as exc:
+                html_response(self, render_trade_page(login, start_date, end_date, limit, [], str(exc)), 500)
+            return
+
         days = parse_positive_int(params.get("days", ["7"])[0], 7, 365)
         top_n = parse_positive_int(params.get("top", ["50"])[0], 50, MAX_LIMIT)
         trade_date = (params.get("date", [""])[0] or "").strip()
