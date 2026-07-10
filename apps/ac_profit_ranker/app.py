@@ -108,7 +108,7 @@ def db_conn():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=10,
-        read_timeout=240,
+        read_timeout=900,
         write_timeout=30,
     )
 
@@ -716,6 +716,7 @@ tr:nth-child(even) td{background:#fafafa}
 .split{height:1px;background:#e5e7eb;margin:14px 0}
 .batch-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .loading{color:#0f766e;font-size:13px}
+.page-loading{display:none;position:fixed;right:18px;bottom:18px;background:#111827;color:white;border-radius:8px;padding:10px 12px;font-size:13px;box-shadow:0 8px 24px rgba(15,23,42,.22);z-index:20}
 .account-card{border:1px solid #d9e2ec;border-radius:8px;margin:10px 0;background:#fff}
 .account-card summary{cursor:pointer;padding:10px 12px;font-weight:700;background:#f8fafc;border-radius:8px}
 .account-card[open] summary{border-bottom:1px solid #e5e7eb;border-radius:8px 8px 0 0}
@@ -739,6 +740,29 @@ def render_table(fields: list[str], rows: list[dict], numeric_fields: set[str], 
         table_rows.append("<tr>" + "".join(cells) + "</tr>")
     body = "\n".join(table_rows) or f"<tr><td colspan='{len(fields)}' class='empty'>{html.escape(empty_text)}</td></tr>"
     return f"<div class='table-wrap'><table><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table></div>"
+
+
+def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "", end: datetime | None = None, trade_date: str = "") -> str:
+    rows = rows or []
+    query = urlencode({"days": days, "top": top_n, "date": trade_date} if trade_date else {"days": days, "top": top_n})
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
+    controls = f"""
+    <form class="form-row" method="get" action="/">
+      <label>最近 N 个交易日<input name="days" type="number" min="1" max="365" value="{days}"></label>
+      <label>盈利前 N 名<input name="top" type="number" min="1" max="{MAX_LIMIT}" value="{top_n}"></label>
+      <label>交易日日期<input name="date" type="date" value="{html.escape(trade_date)}"></label>
+      <button type="submit">筛选</button>
+      <a class="btn secondary" href="/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        FIELDS,
+        rows,
+        {"balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"},
+        "暂无结果",
+    )
+    hint = f"查询区间：<b>{html.escape(start_text)}</b> 到 <b>{html.escape(end_text)}</b>。页面打开和 tab 切换不会查库；点击筛选后才会查询。"
+    return render_shell("rank", "盈利排名", controls, table, len(rows), hint, error)
 
 
 def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
@@ -771,6 +795,20 @@ def render_shell(active: str, title: str, controls: str, table_html: str, count:
     {table_html}
   </section>
 </main>
+<div id="pageLoading" class="page-loading">查询中，请稍等...</div>
+<script>
+document.addEventListener('submit', event => {{
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const loading = document.getElementById('pageLoading');
+  if (loading) loading.style.display = 'block';
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {{
+    button.disabled = true;
+    button.textContent = '查询中...';
+  }}
+}});
+</script>
 </body>
 </html>"""
 
@@ -996,6 +1034,54 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     """ % json.dumps(TRADE_FIELDS, ensure_ascii=False)
     hint = "切换 tab 不会查数据库。单账号查询只查输入的 login；一键分析会按盈利排名前100的顺序，每25个账号一批加载，并可逐个折叠查看。"
     return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
+
+
+def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
+    rank_active = " active" if active == "rank" else ""
+    trades_active = " active" if active == "trades" else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>{BASE_STYLE}</style>
+</head>
+<body>
+<header>
+  <h1>AC 数据分析工具</h1>
+  <nav class="tabs">
+    <a class="tab{rank_active}" href="/">盈利排名</a>
+    <a class="tab{trades_active}" href="/trades">交易记录</a>
+  </nav>
+</header>
+<main>
+  <section class="panel">
+    {controls}
+    <div class="hint">{hint}</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{count} 行</div>
+    {table_html}
+  </section>
+</main>
+<div id="pageLoading" class="page-loading">查询中，请稍等...</div>
+<script>
+document.addEventListener('submit', event => {{
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const loading = document.getElementById('pageLoading');
+  if (loading) loading.style.display = 'block';
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {{
+    button.disabled = true;
+    button.textContent = '查询中...';
+  }}
+}});
+</script>
+</body>
+</html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
