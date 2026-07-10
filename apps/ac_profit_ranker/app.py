@@ -801,6 +801,84 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     return render_shell("trades", "交易记录", controls, table, len(rows), hint, error)
 
 
+def render_shell(active: str, title: str, controls: str, table_html: str, count: int, hint: str, error: str = "") -> str:
+    rank_active = " active" if active == "rank" else ""
+    trades_active = " active" if active == "trades" else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>{BASE_STYLE}</style>
+</head>
+<body>
+<header>
+  <h1>AC 数据分析工具</h1>
+  <nav class="tabs">
+    <a class="tab{rank_active}" href="/">盈利排名</a>
+    <a class="tab{trades_active}" href="/trades">交易记录</a>
+  </nav>
+</header>
+<main>
+  <section class="panel">
+    {controls}
+    <div class="hint">{hint}</div>
+    {f"<div class='error'>{html.escape(error)}</div>" if error else ""}
+  </section>
+  <section class="panel">
+    <div class="hint">结果：{count} 行</div>
+    {table_html}
+  </section>
+</main>
+</body>
+</html>"""
+
+
+def render_rank_page_ui(days: int, top_n: int, start: datetime | None, rows: list[dict] | None, error: str = "", end: datetime | None = None, trade_date: str = "") -> str:
+    rows = rows or []
+    query = urlencode({"days": days, "top": top_n, "date": trade_date} if trade_date else {"days": days, "top": top_n})
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S") if start else "-"
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S") if end else "-"
+    controls = f"""
+    <form class="form-row" method="get" action="/">
+      <label>最近 N 个交易日<input name="days" type="number" min="1" max="365" value="{days}"></label>
+      <label>盈利前 N 名<input name="top" type="number" min="1" max="{MAX_LIMIT}" value="{top_n}"></label>
+      <label>交易日日期<input name="date" type="date" value="{html.escape(trade_date)}"></label>
+      <button type="submit">筛选</button>
+      <a class="btn secondary" href="/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        FIELDS,
+        rows,
+        {"balance", "volume_sum_open", "volume_sum_close", "vol_diff", "profit_sum", "volume_floating", "profit_floating"},
+        "暂无结果",
+    )
+    hint = f"查询区间：<b>{html.escape(start_text)}</b> 到 <b>{html.escape(end_text)}</b>。日期为空时先不查库；填 2026-07-09 表示 7.8 21:00 到 7.9 20:59:59。"
+    return render_shell("rank", "盈利排名", controls, table, len(rows), hint, error)
+
+
+def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    controls = f"""
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+    </form>"""
+    table = render_table(
+        TRADE_FIELDS,
+        rows,
+        {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"},
+        "请输入 login 查询",
+    )
+    hint = "自动查询 MT4、主 MT5、Int MT5、MT5 live3。按交易时间倒序显示，适合快速回看指定账号历史交易。"
+    return render_shell("trades", "交易记录", controls, table, len(rows), hint, error)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {self.address_string()} {fmt % args}")
@@ -823,6 +901,10 @@ class Handler(BaseHTTPRequestHandler):
                 html_response(self, render_trade_page_ui(login, start_date, end_date, limit, rows))
             except Exception as exc:
                 html_response(self, render_trade_page_ui(login, start_date, end_date, limit, [], str(exc)), 500)
+            return
+
+        if parsed.path == "/" and not parsed.query:
+            html_response(self, render_rank_page_ui(1, 100, None, []))
             return
 
         days = parse_positive_int(params.get("days", ["7"])[0], 7, 365)
