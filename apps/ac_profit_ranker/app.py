@@ -1372,7 +1372,7 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     function appendAccount(account) {
       const html = `
         <details class="account-card">
-          <summary>序号 ${account.seq} - login ${htmlEscape(account.login)} - ${htmlEscape(account.name)} - 盈利 ${htmlEscape(account.profit_sum)} - 交易 ${account.trade_count} 条</summary>
+          <summary>序号 ${account.seq} - 池子 ${htmlEscape(account.group_name || '未知')} - login ${htmlEscape(account.login)} - ${htmlEscape(account.name)} - 盈利 ${htmlEscape(account.profit_sum)} - 交易 ${account.trade_count} 条</summary>
           <div class="account-body">${renderMiniTable(account.trades || [])}</div>
         </details>`;
       batchResults.insertAdjacentHTML('beforeend', html);
