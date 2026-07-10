@@ -1319,6 +1319,136 @@ document.addEventListener('submit', event => {{
 </html>"""
 
 
+def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    default_rank_date = previous_trading_date()
+    controls = f"""
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询单账号</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+    </form>
+    <div class="split"></div>
+    <div class="form-row">
+      <label>排名交易日<input id="batchDate" type="date" value="{html.escape(default_rank_date)}"></label>
+      <label>最近 N 个交易日<input id="batchDays" type="number" min="1" max="365" value="1"></label>
+      <label>交易开始<input id="batchStart" type="date" value="{html.escape(start_date)}"></label>
+      <label>交易结束<input id="batchEnd" type="date" value="{html.escape(end_date)}"></label>
+      <label>每账号最多交易<input id="batchLimit" type="number" min="1" max="1000" value="100"></label>
+    </div>
+    <div class="batch-actions">
+      <button id="batchStartBtn" type="button">一键分析前100盈利账户</button>
+      <button id="batchNextBtn" type="button" class="btn secondary" disabled>下一批 25 个</button>
+      <span id="batchStatus" class="loading"></span>
+    </div>"""
+    single_table = render_table(
+        TRADE_FIELDS,
+        rows,
+        {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"},
+        "请输入 login 查询，或使用上方一键分析批量查看。",
+    )
+    batch_html = """
+    <div id="batchResults"></div>
+    <script>
+    const tradeFields = %s;
+    let batchOffset = 0;
+    let batchBusy = false;
+    const batchStartBtn = document.getElementById('batchStartBtn');
+    const batchNextBtn = document.getElementById('batchNextBtn');
+    const batchStatus = document.getElementById('batchStatus');
+    const batchResults = document.getElementById('batchResults');
+    function htmlEscape(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function renderMiniTable(rows) {
+      if (!rows.length) return '<div class="empty">这个账号在所选日期内暂无交易</div>';
+      const head = tradeFields.map(field => `<th>${htmlEscape(field)}</th>`).join('');
+      const body = rows.map(row => `<tr>${tradeFields.map(field => `<td>${htmlEscape(row[field])}</td>`).join('')}</tr>`).join('');
+      return `<div class="mini-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+    function appendAccount(account) {
+      const html = `
+        <details class="account-card">
+          <summary>序号 ${account.seq} - login ${htmlEscape(account.login)} - ${htmlEscape(account.name)} - 盈利 ${htmlEscape(account.profit_sum)} - 交易 ${account.trade_count} 条</summary>
+          <div class="account-body">${renderMiniTable(account.trades || [])}</div>
+        </details>`;
+      batchResults.insertAdjacentHTML('beforeend', html);
+    }
+    function setBatchButtons(done, hasNext) {
+      batchBusy = false;
+      batchStartBtn.disabled = false;
+      batchNextBtn.disabled = !hasNext;
+      if (done && !hasNext) batchNextBtn.disabled = true;
+    }
+    async function loadBatch(reset) {
+      if (batchBusy) return;
+      batchBusy = true;
+      if (reset) {
+        batchOffset = 0;
+        batchResults.innerHTML = '';
+      }
+      batchStartBtn.disabled = true;
+      batchNextBtn.disabled = true;
+      batchStatus.textContent = `准备排名：第 ${batchOffset + 1} 到 ${batchOffset + 25} 个账号...`;
+      const query = new URLSearchParams({
+        offset: String(batchOffset),
+        batch: '25',
+        top: '100',
+        days: document.getElementById('batchDays').value || '1',
+        date: document.getElementById('batchDate').value || '',
+        start: document.getElementById('batchStart').value,
+        end: document.getElementById('batchEnd').value,
+        limit: document.getElementById('batchLimit').value || '100'
+      });
+      let processed = 0;
+      try {
+        const response = await fetch(`/api/analyze-stream?${query.toString()}`, {cache: 'no-store'});
+        if (!response.ok || !response.body) throw new Error('批量分析启动失败');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const {value, done} = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, {stream: true});
+          const lines = buffer.split('\\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line);
+            if (event.type === 'status') {
+              batchStatus.textContent = event.message || '处理中...';
+            } else if (event.type === 'account') {
+              processed += 1;
+              appendAccount(event.account);
+              batchStatus.textContent = `已输出 ${processed}/25 个，本批正在继续...`;
+            } else if (event.type === 'done') {
+              batchOffset = event.next_offset || batchOffset + processed;
+              batchStatus.textContent = event.has_next ? `本批完成，已到第 ${batchOffset} 个，可继续下一批。` : '前100账号已加载完。';
+              setBatchButtons(true, Boolean(event.has_next));
+            } else if (event.type === 'error') {
+              throw new Error(event.message || '批量分析失败');
+            }
+          }
+        }
+      } catch (error) {
+        batchStatus.textContent = error instanceof Error ? error.message : '批量分析失败';
+        setBatchButtons(false, false);
+      } finally {
+        if (batchBusy) setBatchButtons(false, processed > 0);
+      }
+    }
+    batchStartBtn.addEventListener('click', () => loadBatch(true));
+    batchNextBtn.addEventListener('click', () => loadBatch(false));
+    </script>
+    """ % json.dumps(TRADE_FIELDS, ensure_ascii=False)
+    hint = "一键分析现在会流式输出：先取前100盈利账户排名，然后每个账号交易记录查完就立刻显示，不用等整批25个全部结束。"
+    return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
+
+
 MT5_SOURCES = [
     ("mt5_live", "sass_crm_ac_mt5_live"),
     ("int_mt5_live_new", "int_sass_crm_ac_mt5_live_new"),
@@ -1626,6 +1756,33 @@ def run_query(days: int, top_n: int, trade_date: str | None = None) -> tuple[dat
     return start, end, rows
 
 
+def run_rank_summary(days: int, top_n: int, trade_date: str | None = None) -> tuple[datetime, datetime, list[dict]]:
+    start, end = trading_window(days, trade_date)
+    start_text = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_text = end.strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            ranked = optimized_rank_rows(cur, start_text, end_text, top_n)
+            logins = [login for login, _profit in ranked]
+            accounts = {login: new_account_bucket(login, profit) for login, profit in ranked}
+            apply_user_info(cur, accounts, logins)
+    rows = []
+    for login in logins:
+        bucket = accounts[login]
+        rows.append({
+            "login": login,
+            "name": bucket.get("name") or "",
+            "group_name": bucket.get("group_name") or "",
+            "profit_sum": f"{bucket['profit_sum']:.4f}",
+        })
+    return start, end, rows
+
+
+def stream_json_line(handler: BaseHTTPRequestHandler, payload: dict) -> None:
+    handler.wfile.write((json.dumps(payload, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+    handler.wfile.flush()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {self.address_string()} {fmt % args}")
@@ -1633,6 +1790,71 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        if parsed.path == "/api/analyze-stream":
+            today = date.today()
+            days = parse_positive_int(params.get("days", ["1"])[0], 1, 365)
+            top_n = parse_positive_int(params.get("top", ["100"])[0], 100, 100)
+            rank_date = (params.get("date", [""])[0] or "").strip()
+            try:
+                offset = int(params.get("offset", ["0"])[0] or "0")
+            except ValueError:
+                offset = 0
+            offset = min(max(offset, 0), 99)
+            batch_size = parse_positive_int(params.get("batch", ["25"])[0], 25, 25)
+            trade_limit = parse_positive_int(params.get("limit", ["100"])[0], 100, 1000)
+            default_start = (today - timedelta(days=30)).isoformat()
+            try:
+                start_date = parse_date_text(params.get("start", [default_start])[0] or default_start)
+                end_date = parse_date_text(params.get("end", [today.isoformat()])[0] or today.isoformat())
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                stream_json_line(self, {"type": "status", "message": "正在获取前100盈利账户排名..."})
+                rank_start, rank_end, rank_rows = run_rank_summary(days, top_n, rank_date or None)
+                selected = rank_rows[offset:offset + batch_size]
+                total_selected = len(selected)
+                stream_json_line(self, {
+                    "type": "status",
+                    "message": f"排名已获取，开始分析本批 {total_selected} 个账号...",
+                    "rank_start": rank_start,
+                    "rank_end": rank_end,
+                    "offset": offset,
+                })
+                for index, account in enumerate(selected, start=offset + 1):
+                    login = str(account.get("login", "")).strip()
+                    stream_json_line(self, {"type": "status", "message": f"正在分析序号 {index} / login {login}..."})
+                    trades = run_trade_query(login, start_date, end_date, trade_limit) if login else []
+                    stream_json_line(self, {
+                        "type": "account",
+                        "account": {
+                            "seq": index,
+                            "login": login,
+                            "name": account.get("name", ""),
+                            "group_name": account.get("group_name", ""),
+                            "profit_sum": account.get("profit_sum", ""),
+                            "trade_count": len(trades),
+                            "trades": trades,
+                        },
+                    })
+                next_offset = offset + total_selected
+                stream_json_line(self, {
+                    "type": "done",
+                    "offset": offset,
+                    "next_offset": next_offset,
+                    "has_next": next_offset < min(top_n, len(rank_rows)),
+                })
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                try:
+                    if not self.wfile.closed:
+                        stream_json_line(self, {"type": "error", "message": str(exc)})
+                except Exception:
+                    pass
+            return
+
         if parsed.path == "/api/analyze-batch":
             today = date.today()
             days = parse_positive_int(params.get("days", ["1"])[0], 1, 365)
