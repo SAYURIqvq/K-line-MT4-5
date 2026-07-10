@@ -408,6 +408,16 @@ def html_response(handler: BaseHTTPRequestHandler, body: str, status: int = 200)
     handler.wfile.write(data)
 
 
+def json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 def csv_response(handler: BaseHTTPRequestHandler, rows: list[dict], filename: str) -> None:
     buf = io.StringIO(newline="")
     writer = csv.DictWriter(buf, fieldnames=FIELDS, extrasaction="ignore")
@@ -703,6 +713,14 @@ th{position:sticky;top:0;background:#eef2f7;z-index:2;text-align:left}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 tr:nth-child(even) td{background:#fafafa}
 .empty{text-align:center;color:#64748b;padding:36px}
+.split{height:1px;background:#e5e7eb;margin:14px 0}
+.batch-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.loading{color:#0f766e;font-size:13px}
+.account-card{border:1px solid #d9e2ec;border-radius:8px;margin:10px 0;background:#fff}
+.account-card summary{cursor:pointer;padding:10px 12px;font-weight:700;background:#f8fafc;border-radius:8px}
+.account-card[open] summary{border-bottom:1px solid #e5e7eb;border-radius:8px 8px 0 0}
+.account-body{padding:10px 12px}
+.mini-table-wrap{max-height:340px;overflow:auto;border:1px solid #e5e7eb;border-radius:6px}
 @media (max-width:760px){header,main{padding-left:14px;padding-right:14px}.tabs{overflow:auto}.tab{white-space:nowrap}input{width:140px}}
 """
 
@@ -879,6 +897,107 @@ def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int,
     return render_shell("trades", "交易记录", controls, table, len(rows), hint, error)
 
 
+def render_trade_page_ui(login: str, start_date: str, end_date: str, limit: int, rows: list[dict], error: str = "") -> str:
+    query = urlencode({"login": login, "start": start_date, "end": end_date, "limit": limit})
+    controls = f"""
+    <form class="form-row" method="get" action="/trades">
+      <label>Login<input name="login" value="{html.escape(login)}" placeholder="例如 32087"></label>
+      <label>开始日期<input name="start" type="date" value="{html.escape(start_date)}"></label>
+      <label>结束日期<input name="end" type="date" value="{html.escape(end_date)}"></label>
+      <label>最多行数<input name="limit" type="number" min="1" max="5000" value="{limit}"></label>
+      <button type="submit">查询单账号</button>
+      <a class="btn secondary" href="/trades/download?{query}">下载 CSV</a>
+    </form>
+    <div class="split"></div>
+    <div class="form-row">
+      <label>排名交易日<input id="batchDate" type="date"></label>
+      <label>最近 N 个交易日<input id="batchDays" type="number" min="1" max="365" value="1"></label>
+      <label>交易开始<input id="batchStart" type="date" value="{html.escape(start_date)}"></label>
+      <label>交易结束<input id="batchEnd" type="date" value="{html.escape(end_date)}"></label>
+      <label>每账号最多交易<input id="batchLimit" type="number" min="1" max="1000" value="100"></label>
+    </div>
+    <div class="batch-actions">
+      <button id="batchStartBtn" type="button">一键分析前100盈利账户</button>
+      <button id="batchNextBtn" type="button" class="btn secondary" disabled>下一批 25 个</button>
+      <span id="batchStatus" class="loading"></span>
+    </div>"""
+    single_table = render_table(
+        TRADE_FIELDS,
+        rows,
+        {"login", "ticket", "order_id", "position_id", "volume", "price_open", "price_close", "profit", "storage", "commission", "fee"},
+        "请输入 login 查询，或使用上方一键分析批量查看。",
+    )
+    batch_html = """
+    <div id="batchResults"></div>
+    <script>
+    const tradeFields = %s;
+    let batchOffset = 0;
+    let batchBusy = false;
+    const batchStartBtn = document.getElementById('batchStartBtn');
+    const batchNextBtn = document.getElementById('batchNextBtn');
+    const batchStatus = document.getElementById('batchStatus');
+    const batchResults = document.getElementById('batchResults');
+    function htmlEscape(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    }
+    function renderMiniTable(rows) {
+      if (!rows.length) return '<div class="empty">这个账号在所选日期内暂无交易</div>';
+      const head = tradeFields.map(field => `<th>${htmlEscape(field)}</th>`).join('');
+      const body = rows.map(row => `<tr>${tradeFields.map(field => `<td>${htmlEscape(row[field])}</td>`).join('')}</tr>`).join('');
+      return `<div class="mini-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+    function appendAccounts(accounts) {
+      const html = accounts.map(account => `
+        <details class="account-card">
+          <summary>序号 ${account.seq} ｜ login ${htmlEscape(account.login)} ｜ ${htmlEscape(account.name)} ｜ 盈利 ${htmlEscape(account.profit_sum)} ｜ 交易 ${account.trade_count} 条</summary>
+          <div class="account-body">${renderMiniTable(account.trades || [])}</div>
+        </details>
+      `).join('');
+      batchResults.insertAdjacentHTML('beforeend', html);
+    }
+    async function loadBatch(reset) {
+      if (batchBusy) return;
+      batchBusy = true;
+      if (reset) {
+        batchOffset = 0;
+        batchResults.innerHTML = '';
+      }
+      batchStartBtn.disabled = true;
+      batchNextBtn.disabled = true;
+      batchStatus.textContent = `加载中：第 ${batchOffset + 1} 到 ${batchOffset + 25} 个账号...`;
+      const query = new URLSearchParams({
+        offset: String(batchOffset),
+        batch: '25',
+        top: '100',
+        days: document.getElementById('batchDays').value || '1',
+        date: document.getElementById('batchDate').value || '',
+        start: document.getElementById('batchStart').value,
+        end: document.getElementById('batchEnd').value,
+        limit: document.getElementById('batchLimit').value || '100'
+      });
+      try {
+        const response = await fetch(`/api/analyze-batch?${query.toString()}`, {cache: 'no-store'});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || '批量分析失败');
+        appendAccounts(payload.accounts || []);
+        batchOffset = payload.next_offset || batchOffset + 25;
+        batchNextBtn.disabled = !payload.has_next;
+        batchStatus.textContent = payload.has_next ? `已加载到第 ${batchOffset} 个，可继续下一批。` : '前100账号已加载完。';
+      } catch (error) {
+        batchStatus.textContent = error instanceof Error ? error.message : '批量分析失败';
+      } finally {
+        batchBusy = false;
+        batchStartBtn.disabled = false;
+      }
+    }
+    batchStartBtn.addEventListener('click', () => loadBatch(true));
+    batchNextBtn.addEventListener('click', () => loadBatch(false));
+    </script>
+    """ % json.dumps(TRADE_FIELDS, ensure_ascii=False)
+    hint = "切换 tab 不会查数据库。单账号查询只查输入的 login；一键分析会按盈利排名前100的顺序，每25个账号一批加载，并可逐个折叠查看。"
+    return render_shell("trades", "交易记录", controls, single_table + batch_html, len(rows), hint, error)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {self.address_string()} {fmt % args}")
@@ -886,6 +1005,50 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
+        if parsed.path == "/api/analyze-batch":
+            today = date.today()
+            days = parse_positive_int(params.get("days", ["1"])[0], 1, 365)
+            top_n = parse_positive_int(params.get("top", ["100"])[0], 100, 100)
+            rank_date = (params.get("date", [""])[0] or "").strip()
+            try:
+                offset = int(params.get("offset", ["0"])[0] or "0")
+            except ValueError:
+                offset = 0
+            offset = min(max(offset, 0), 99)
+            batch_size = parse_positive_int(params.get("batch", ["25"])[0], 25, 25)
+            trade_limit = parse_positive_int(params.get("limit", ["100"])[0], 100, 1000)
+            default_start = (today - timedelta(days=30)).isoformat()
+            start_date = parse_date_text(params.get("start", [default_start])[0] or default_start)
+            end_date = parse_date_text(params.get("end", [today.isoformat()])[0] or today.isoformat())
+            try:
+                rank_start, rank_end, rank_rows = run_query(days, top_n, rank_date or None)
+                selected = rank_rows[offset:offset + batch_size]
+                accounts = []
+                for index, account in enumerate(selected, start=offset + 1):
+                    login = str(account.get("login", "")).strip()
+                    trades = run_trade_query(login, start_date, end_date, trade_limit) if login else []
+                    accounts.append({
+                        "seq": index,
+                        "login": login,
+                        "name": account.get("name", ""),
+                        "group_name": account.get("group_name", ""),
+                        "profit_sum": account.get("profit_sum", ""),
+                        "trade_count": len(trades),
+                        "trades": trades,
+                    })
+                json_response(self, {
+                    "accounts": accounts,
+                    "offset": offset,
+                    "next_offset": offset + len(selected),
+                    "has_next": offset + len(selected) < min(top_n, len(rank_rows)),
+                    "rank_start": rank_start,
+                    "rank_end": rank_end,
+                    "fields": TRADE_FIELDS,
+                })
+            except Exception as exc:
+                json_response(self, {"error": str(exc)}, 500)
+            return
+
         if parsed.path in {"/trades", "/trades/download"}:
             login = (params.get("login", [""])[0] or "").strip()
             today = date.today()
